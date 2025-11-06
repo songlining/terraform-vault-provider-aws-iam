@@ -38,6 +38,117 @@ Terraform Provider
   ↓ Retrieves secret data from KV v2 engine
 ```
 
+## How AWS IAM Authentication Works
+
+This implementation uses Vault's AWS auth method with IAM authentication, which allows AWS IAM principals (users, roles, or EC2 instances) to authenticate to Vault without requiring pre-shared secrets or tokens.
+
+### Authentication Mechanism
+
+The AWS IAM authentication method uses AWS's own cryptographic signing to verify identity:
+
+1. **Client Side (Terraform CLI on EC2)**:
+   - The Terraform Vault provider automatically retrieves AWS credentials from the EC2 instance metadata service (IMDS)
+   - It creates a signed AWS API request (`sts:GetCallerIdentity`) using the instance's IAM role credentials
+   - The signed request includes:
+     - AWS access key ID
+     - Temporary session token
+     - Cryptographic signature
+     - The `X-Vault-AWS-IAM-Server-ID` header (matching the `header_value` in provider config)
+   - This signed request is sent to Vault's AWS auth endpoint
+
+2. **Server Side (Vault)**:
+   - Vault receives the signed AWS API request
+   - Vault submits this exact signed request to AWS STS API
+   - AWS validates the signature and returns the caller's identity (IAM role ARN)
+   - Vault extracts the IAM principal ARN from the AWS response
+   - Vault matches this ARN against configured auth roles (in this case, the `terraform-cli` role)
+   - If a match is found, Vault issues a token with the policies assigned to that role
+
+3. **Security Benefits**:
+   - **No secrets to manage**: No API keys, passwords, or tokens need to be stored
+   - **Cryptographic proof**: AWS validates the signature, proving the caller's identity
+   - **Time-limited**: EC2 instance credentials are automatically rotated by AWS
+   - **Audit trail**: Both AWS CloudTrail and Vault audit logs capture authentication attempts
+   - **SSRF protection**: The `header_value` parameter prevents Server-Side Request Forgery attacks
+
+### Key Components
+
+#### IAM Role Binding
+
+Vault's AWS auth is configured with **role binding** that maps the IAM role ARN to Vault policies:
+
+```hcl
+# On Vault server - configured during setup
+vault write auth/aws/role/terraform-cli \
+    auth_type=iam \
+    bound_iam_principal_arn="arn:aws:iam::ACCOUNT_ID:role/terraform-cli-role" \
+    policies="terraform-policy" \
+    ttl=1h
+```
+
+This configuration:
+- Creates a Vault auth role named `terraform-cli`
+- Binds it specifically to the `terraform-cli-role` IAM role ARN
+- Grants the `terraform-policy` Vault policy to authenticated sessions
+- Sets token TTL to 1 hour (automatically renewed by the provider)
+
+#### Required IAM Permissions
+
+**For the Client (terraform-cli-role)**:
+```json
+{
+  "Effect": "Allow",
+  "Action": "ec2:DescribeInstances",
+  "Resource": "*"
+}
+```
+This allows Vault to retrieve instance metadata to verify the instance's IAM role attachment.
+
+**For Vault Server (vault-server-role)**:
+```json
+{
+  "Effect": "Allow",
+  "Action": "iam:GetRole",
+  "Resource": "*"
+}
+```
+This allows Vault to retrieve IAM role information to validate the principal.
+
+#### Header Value (SSRF Protection)
+
+The `header_value` parameter in the Vault provider configuration serves as an additional security measure:
+
+```hcl
+auth_login_aws {
+  role = "terraform-cli"
+  header_value = "https://ec2-3-27-81-180.ap-southeast-2.compute.amazonaws.com:8200"
+}
+```
+
+This value:
+- Must match the Vault server's expected value
+- Prevents attackers from reusing captured authentication requests against different Vault servers
+- Protects against Server-Side Request Forgery (SSRF) attacks
+- Should typically be set to the Vault server's address
+
+### Comparison with Other Auth Methods
+
+| Feature | AWS IAM Auth | Token Auth | AppRole Auth |
+|---------|-------------|------------|--------------|
+| Secret Management | None required | Token must be secured | Secret ID must be secured |
+| Rotation | Automatic by AWS | Manual | Manual |
+| AWS Integration | Native | None | None |
+| Use Case | AWS workloads | Development/Manual | CI/CD, non-AWS apps |
+| Setup Complexity | Medium | Low | Medium |
+
+### Token Lifecycle
+
+1. **Initial Authentication**: When Terraform runs, the provider authenticates and receives a token
+2. **Token Storage**: Token is kept in memory (not persisted to disk)
+3. **Automatic Renewal**: The provider automatically renews the token before expiration
+4. **No Child Tokens**: With `skip_child_token = true`, the provider uses the login token directly instead of creating child tokens for each operation
+5. **Session End**: Token is discarded when Terraform completes
+
 ## Prerequisites
 
 - Terraform 1.10.5 or later
