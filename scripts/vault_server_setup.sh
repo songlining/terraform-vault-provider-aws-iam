@@ -111,6 +111,11 @@ vault kv put secret/myapp username=demouser password=demopassword environment=pr
 # Enable and configure AWS auth method for Terraform CLI authentication
 vault auth enable aws
 
+# this is the best option for most cases. However, if Vault server can't be updated this way 
+# so easily in production. You can set the aws_region in the terraform vault provider instead.
+vault write auth/aws/config/client \
+    use_sts_region_from_client=true
+
 # Create policy for Terraform CLI to read secrets
 cat > /etc/vault.d/terraform-policy.hcl << EOF
 path "secret/data/myapp" {

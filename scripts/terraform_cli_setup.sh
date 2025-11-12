@@ -42,6 +42,7 @@ provider "vault" {
   auth_login_aws {
     role = "terraform-cli"
     header_value = "https://${vault_server_dns}:8200"
+    # aws_region = "us-east-1"  # Optional: specify AWS region if needed
   }
 }
 
